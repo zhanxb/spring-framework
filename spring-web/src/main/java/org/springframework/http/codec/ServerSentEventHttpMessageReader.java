@@ -30,7 +30,6 @@ import org.springframework.core.codec.CodecException;
 import org.springframework.core.codec.Decoder;
 import org.springframework.core.codec.StringDecoder;
 import org.springframework.core.io.buffer.DataBuffer;
-import org.springframework.core.io.buffer.DataBufferFactory;
 import org.springframework.core.io.buffer.DataBufferLimitException;
 import org.springframework.core.io.buffer.DefaultDataBufferFactory;
 import org.springframework.http.MediaType;
@@ -47,8 +46,6 @@ import org.springframework.lang.Nullable;
  */
 public class ServerSentEventHttpMessageReader implements HttpMessageReader<Object> {
 
-	private static final DataBufferFactory bufferFactory = new DefaultDataBufferFactory();
-
 	private static final ResolvableType STRING_TYPE = ResolvableType.forClass(String.class);
 
 
@@ -56,8 +53,6 @@ public class ServerSentEventHttpMessageReader implements HttpMessageReader<Objec
 	private final Decoder<?> decoder;
 
 	private final StringDecoder lineDecoder = StringDecoder.textPlainOnly();
-
-
 
 
 	/**
@@ -135,7 +130,10 @@ public class ServerSentEventHttpMessageReader implements HttpMessageReader<Objec
 		return this.lineDecoder.decode(message.getBody(), STRING_TYPE, null, hints)
 				.doOnNext(limitTracker::afterLineParsed)
 				.bufferUntil(String::isEmpty)
-				.map(lines -> buildEvent(lines, valueType, shouldWrap, hints));
+				.concatMap(lines -> {
+					Object event = buildEvent(lines, valueType, shouldWrap, hints);
+					return (event != null ? Mono.just(event) : Mono.empty());
+				});
 	}
 
 	@Nullable
@@ -168,11 +166,11 @@ public class ServerSentEventHttpMessageReader implements HttpMessageReader<Objec
 			}
 		}
 
-		Object decodedData = data != null ? decodeData(data.toString(), valueType, hints) : null;
+		Object decodedData = (data != null ? decodeData(data, valueType, hints) : null);
 
 		if (shouldWrap) {
 			if (comment != null) {
-				sseBuilder.comment(comment.toString().substring(0, comment.length() - 1));
+				sseBuilder.comment(comment.substring(0, comment.length() - 1));
 			}
 			if (decodedData != null) {
 				sseBuilder.data(decodedData);
@@ -185,15 +183,15 @@ public class ServerSentEventHttpMessageReader implements HttpMessageReader<Objec
 	}
 
 	@Nullable
-	private Object decodeData(String data, ResolvableType dataType, Map<String, Object> hints) {
+	private Object decodeData(StringBuilder data, ResolvableType dataType, Map<String, Object> hints) {
 		if (String.class == dataType.resolve()) {
 			return data.substring(0, data.length() - 1);
 		}
 		if (this.decoder == null) {
 			throw new CodecException("No SSE decoder configured and the data is not String.");
 		}
-		byte[] bytes = data.getBytes(StandardCharsets.UTF_8);
-		DataBuffer buffer = bufferFactory.wrap(bytes);  // wrapping only, no allocation
+		byte[] bytes = data.toString().getBytes(StandardCharsets.UTF_8);
+		DataBuffer buffer = DefaultDataBufferFactory.sharedInstance.wrap(bytes);  // wrapping only, no allocation
 		return this.decoder.decode(buffer, dataType, MediaType.TEXT_EVENT_STREAM, hints);
 	}
 
@@ -218,7 +216,6 @@ public class ServerSentEventHttpMessageReader implements HttpMessageReader<Objec
 
 		private int accumulated = 0;
 
-
 		public void afterLineParsed(String line) {
 			if (getMaxInMemorySize() < 0) {
 				return;
@@ -239,8 +236,7 @@ public class ServerSentEventHttpMessageReader implements HttpMessageReader<Objec
 
 		private void raiseLimitException() {
 			// Do not release here, it's likely down via doOnDiscard..
-			throw new DataBufferLimitException(
-					"Exceeded limit on max bytes to buffer : " + getMaxInMemorySize());
+			throw new DataBufferLimitException("Exceeded limit on max bytes to buffer : " + getMaxInMemorySize());
 		}
 	}
 
